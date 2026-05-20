@@ -19,12 +19,12 @@
   ],
   "author": "ARGO'S System",
   "license": "ISC",
- "dependencies": {
-    "@whiskeysockets/baileys": "6.6.0",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "groq-sdk": "^0.3.3",
-    "pino": "^9.0.0",
     "qrcode-terminal": "^0.12.0"
   }
+}
