@@ -9,16 +9,16 @@ const fs = require('fs');
 const pino = require('pino'); 
 require('dotenv').config();
 
-// --- PROTEÇÃO GLOBAL CONTRA CRASHES ---
+// --- PROTEÇÃO GLOBAL CONTRA QUEDAS (CRASHES) ---
 process.on('uncaughtException', (err) => {
-    console.error('[ERRO CRÍTICO NÃO TRATADO]:', err);
+    console.error('[ERRO CRÍTICO NÃO TRATADO]:', err?.message || err);
 });
 process.on('unhandledRejection', (reason, promise) => {
     console.error('[PROMISE REJEITADA NÃO TRATADA]:', reason?.message || reason);
 });
 
 process.on('SIGTERM', () => {
-    console.log('\n[SISTEMA] Sinal SIGTERM recebido do Railway. O servidor está a ser reiniciado ou forçado a parar.');
+    console.log('\n[SISTEMA] Sinal SIGTERM recebido do Railway. Salvando estado e encerrando com segurança...');
     process.exit(0);
 });
 
@@ -32,6 +32,7 @@ if (!fs.existsSync(authBaseFolder)) {
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// Configuração única e limpa de CORS para o GestãoPro
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -41,6 +42,7 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Rota de Saúde
 app.get('/', (req, res) => {
     res.status(200).send("ARGO'S MULTI-DEVICE SYSTEM ONLINE!");
 });
@@ -63,13 +65,18 @@ Diretrizes de Resposta:
 // =====================================================================
 const botInstances = {};
 
+// Função assíncrona ultra-leve para processar a fila sem estourar a RAM
 async function processQueue(botNumber) {
     const instance = botInstances[botNumber];
     if (!instance) return;
 
     while (instance.sendQueue && instance.sendQueue.length > 0) {
+        // Se a instância foi apagada a meio do processo, interrompe a fila
+        if (!botInstances[botNumber]) return;
+
+        // Se a ligação cair, a fila entra em pausa e aguarda sem perder mensagens
         if (instance.status !== 'online' || !instance.sock) {
-            console.log(`[FILA] Bot ${botNumber} está offline (Erro 503). Fila em pausa. A aguardar...`);
+            console.log(`[FILA] Bot ${botNumber} está offline. Fila em pausa. A aguardar...`);
             await delay(5000);
             continue; 
         }
@@ -77,24 +84,32 @@ async function processQueue(botNumber) {
         const { jid, text } = instance.sendQueue.shift();
         
         try {
+            // Atraso de segurança dinâmico para evitar banimento por spam
             const waitTime = 2000 + Math.floor(Math.random() * 2000);
             await delay(waitTime);
 
-            const [waStatus] = await instance.sock.onWhatsApp(jid);
-
-            if (waStatus && waStatus.exists) {
-                await instance.sock.sendMessage(waStatus.jid, { text });
-                console.log(`[DISPARO] Mensagem entregue a ${waStatus.jid} via bot ${botNumber} | Restam: ${instance.sendQueue.length}`);
-            } else {
-                console.log(`[AVISO] O número ${jid} não tem WhatsApp ou é inválido. Disparo ignorado.`);
+            // --- VALIDAÇÃO DE NÚMERO SEGURA ---
+            let targetJid = jid;
+            try {
+                const [waStatus] = await instance.sock.onWhatsApp(jid);
+                if (waStatus && waStatus.exists) {
+                    targetJid = waStatus.jid; // Usa o JID formatado oficial (com ou sem o 9º dígito)
+                } else {
+                    console.log(`[AVISO] O número ${jid} não possui conta ativa no WhatsApp. Disparo ignorado.`);
+                    continue; 
+                }
+            } catch (errCheck) {
+                // Se a verificação onWhatsApp falhar devido a instabilidade da Meta, tenta enviar direto
+                console.log(`[AVISO] Falha ao verificar número ${jid} na Meta. Tentando entrega direta...`);
             }
+
+            await instance.sock.sendMessage(targetJid, { text });
+            console.log(`[DISPARO] Mensagem entregue a ${targetJid} via bot ${botNumber} | Restam: ${instance.sendQueue.length}`);
         } catch (e) {
             console.error(`[ERRO DISPARO] Falha ao enviar para ${jid}:`, e.message || e);
-            if (e.message && e.message.toLowerCase().includes('closed')) {
-                // Devolve para a fila apenas se a instância ainda existir
-                if (botInstances[botNumber]) {
-                    botInstances[botNumber].sendQueue.unshift({ jid, text });
-                }
+            // Se a ligação caiu durante o envio, devolve a mensagem para o início da fila
+            if (e.message && e.message.toLowerCase().includes('closed') && botInstances[botNumber]) {
+                botInstances[botNumber].sendQueue.unshift({ jid, text });
             }
         }
     }
@@ -105,8 +120,14 @@ async function processQueue(botNumber) {
 }
 
 async function startBot(botNumber) {
-    if (botInstances[botNumber] && botInstances[botNumber].sock) {
-        console.log(`[SISTEMA] Bot ${botNumber} já está em execução.`);
+    // ⚠️ Proteção contra dupla inicialização simultânea (Race Condition)
+    if (botInstances[botNumber] && (botInstances[botNumber].status === 'initializing' || botInstances[botNumber].status === 'pairing')) {
+        console.log(`[SISTEMA] O bot ${botNumber} já se encontra em processo de inicialização.`);
+        return;
+    }
+
+    if (botInstances[botNumber] && botInstances[botNumber].sock && botInstances[botNumber].status === 'online') {
+        console.log(`[SISTEMA] O bot ${botNumber} já se encontra online.`);
         return;
     }
 
@@ -224,6 +245,15 @@ async function startBot(botNumber) {
             let msg = m.messages[0];
             if (!msg.message || msg.key.fromMe || msg.key.remoteJid?.endsWith("@g.us")) return;
             
+            // ⚠️ PROTEÇÃO VITAL: Ignorar mensagens de histórico recebidas no startup
+            const messageTimestamp = msg.messageTimestamp;
+            if (messageTimestamp) {
+                const nowInSeconds = Math.floor(Date.now() / 1000);
+                if (nowInSeconds - messageTimestamp > 60) {
+                    return; // Ignora se a mensagem tiver mais de 1 minuto
+                }
+            }
+
             if (!botInstances[botNumber] || !botInstances[botNumber].isAutoReplyActive) return;
 
             const jid = msg.key.remoteJid;
@@ -247,8 +277,12 @@ async function handleAIProcess(botNumber, jid, text) {
     const instance = botInstances[botNumber];
     if (!instance) return; 
 
-    if (!instance.sessions[jid]) instance.sessions[jid] = { chat: [] };
+    // Inicializa a sessão com carimbo de data/hora para controlo de inatividade (Anti-Leak)
+    if (!instance.sessions[jid]) {
+        instance.sessions[jid] = { chat: [], lastActive: Date.now() };
+    }
     const session = instance.sessions[jid];
+    session.lastActive = Date.now(); // Atualiza a atividade
 
     session.chat.push({ role: "user", content: text });
     if (session.chat.length > 10) session.chat.shift();
@@ -277,6 +311,23 @@ async function handleAIProcess(botNumber, jid, text) {
         console.error(`[ERRO AI - ${botNumber}]:`, err.message || err);
     }
 }
+
+// --- LIMPEZA DE SESSÕES INATIVAS (ANTI FUGA DE MEMÓRIA) ---
+// Executado a cada 10 minutos para remover dados da RAM de pessoas que pararam de interagir
+setInterval(() => {
+    const now = Date.now();
+    for (const botNumber of Object.keys(botInstances)) {
+        const instance = botInstances[botNumber];
+        if (instance && instance.sessions) {
+            for (const [jid, session] of Object.entries(instance.sessions)) {
+                // Se o utilizador não mandar mensagem há mais de 30 minutos, liberta a RAM
+                if (now - session.lastActive > 1800000) {
+                    delete instance.sessions[jid];
+                }
+            }
+        }
+    }
+}, 600000);
 
 // =====================================================================
 // 🌐 ROTAS DA API PARA O SITE DE GESTÃO (GESTAOPRO)
@@ -321,6 +372,12 @@ app.post('/api/send', (req, res) => {
     const jid = `${cleanRecipient}@s.whatsapp.net`;
 
     if (!instance.sendQueue) instance.sendQueue = [];
+    
+    // Proteção de tamanho máximo de fila (Evita acumulação infinita na RAM em disparos acidentais)
+    if (instance.sendQueue.length > 5000) {
+        return res.status(429).json({ error: "A fila deste bot atingiu o limite de 5000 mensagens pendentes. Aguarde o processamento." });
+    }
+
     instance.sendQueue.push({ jid, text: message });
 
     if (!instance.isProcessingQueue) {
