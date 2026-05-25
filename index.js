@@ -9,7 +9,6 @@ const fs = require('fs');
 const pino = require('pino'); 
 require('dotenv').config();
 
-// --- PROTEÇÃO GLOBAL CONTRA QUEDAS (CRASHES) ---
 process.on('uncaughtException', (err) => {
     console.error('[ERRO CRÍTICO NÃO TRATADO]:', err?.message || err);
 });
@@ -22,13 +21,11 @@ process.on('SIGTERM', () => {
     process.exit(0);
 });
 
-// --- DIRETÓRIO BASE DE AUTENTICAÇÃO ---
 const authBaseFolder = './auth';
 if (!fs.existsSync(authBaseFolder)) {
     fs.mkdirSync(authBaseFolder, { recursive: true });
 }
 
-// --- CONFIGURAÇÃO DO SERVIDOR EXPRESS ---
 const app = express();
 const PORT = process.env.PORT || 8080;
 
@@ -45,7 +42,6 @@ app.get('/', (req, res) => {
     res.status(200).send("ARGO'S MULTI-DEVICE SYSTEM ONLINE!");
 });
 
-// --- CONFIGURAÇÃO DA IA GROQ ---
 const PROMPT_ARGOS = `Você é o ARGO'S, o assistente virtual inteligente oficial.
 Unidade: Angra dos Reis.
 Site de Gestão: gestaopro-five.vercel.app
@@ -58,9 +54,6 @@ Diretrizes de Resposta:
 5. Se o atendimento automático estiver desativado no sistema, você não deve responder.
 6. Nunca invente dados de pedidos. Direcione o cliente para o painel do site se necessário.`;
 
-// =====================================================================
-// 🤖 GESTOR DE MÚLTIPLOS BOTS E FILA DE MENSAGENS (MULTI-DEVICE)
-// =====================================================================
 const botInstances = {};
 
 async function processQueue(botNumber) {
@@ -316,7 +309,6 @@ async function handleAIProcess(botNumber, jid, text) {
     }
 }
 
-// --- LIMPEZA DE SESSÕES INATIVAS (ANTI FUGA DE MEMÓRIA) ---
 setInterval(() => {
     const now = Date.now();
     for (const botNumber of Object.keys(botInstances)) {
@@ -330,10 +322,6 @@ setInterval(() => {
         }
     }
 }, 600000);
-
-// =====================================================================
-// 🌐 ROTAS DA API PARA O SITE DE GESTÃO (GESTAOPRO)
-// =====================================================================
 
 function formatNumberBR(number) {
     let clean = number.toString().replace(/\D/g, '');
@@ -360,7 +348,7 @@ app.post('/api/send', (req, res) => {
     const { botNumber, number, message } = req.body;
     
     if (!botNumber || !number || !message) {
-        return res.status(400).json({ error: "Os campos 'botNumber', 'number' e 'message' pode estar vazio." });
+        return res.status(400).json({ error: "Os campos 'botNumber', 'number' e 'message' não podem estar vazios." });
     }
 
     const cleanBotNumber = formatNumberBR(botNumber);
