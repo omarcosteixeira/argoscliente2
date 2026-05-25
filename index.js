@@ -202,6 +202,8 @@ async function startBot(botNumber) {
                 if (botInstances[botNumber]) botInstances[botNumber].status = 'offline';
                 
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
+                
+                // Variável que identifica se a Meta baniu/recusou ativamente a ligação
                 const isLogout = statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403;
                 const isRestartRequired = statusCode === DisconnectReason.restartRequired || statusCode === 515;
                 
@@ -210,18 +212,19 @@ async function startBot(botNumber) {
                     if (botInstances[botNumber]) botInstances[botNumber].sock = null; 
                     setTimeout(() => startBot(botNumber), 2000);
                 } 
-                else if (!isLogout || !state.creds.registered) {
-                    console.log(`[LIGAÇÃO - ${botNumber}] Fechada (Código: ${statusCode}). A tentar reconectar em 5s...`);
-                    if (botInstances[botNumber]) botInstances[botNumber].sock = null; 
-                    setTimeout(() => startBot(botNumber), 5000); 
-                } else {
-                    console.log(`[SISTEMA - ${botNumber}] O dispositivo terminou a sessão ou foi bloqueado por segurança.`);
+                // ⚠️ CORREÇÃO AQUI: Se a Meta der erro 401/403, ele NÃO tenta de novo. Aborta imediatamente!
+                else if (isLogout) {
+                    console.log(`[SISTEMA - ${botNumber}] A Meta recusou a ligação (Erro ${statusCode}). Dispositivo bloqueado temporariamente ou deslogado.`);
                     try { fs.rmSync(authFolder, { recursive: true, force: true }); } catch(e) {}
                     
                     if (botInstances[botNumber]) {
                         botInstances[botNumber].isDeleted = true;
                     }
                     delete botInstances[botNumber];
+                } else {
+                    console.log(`[LIGAÇÃO - ${botNumber}] Fechada (Código: ${statusCode}). A tentar reconectar em 5s...`);
+                    if (botInstances[botNumber]) botInstances[botNumber].sock = null; 
+                    setTimeout(() => startBot(botNumber), 5000); 
                 }
             } else if (connection === 'open') {
                 if (botInstances[botNumber]) {
