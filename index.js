@@ -9,6 +9,7 @@ const fs = require('fs');
 const pino = require('pino'); 
 require('dotenv').config();
 
+// --- PROTEÇÃO GLOBAL CONTRA QUEDAS ---
 process.on('uncaughtException', (err) => {
     console.error('[ERRO CRÍTICO NÃO TRATADO]:', err?.message || err);
 });
@@ -21,11 +22,13 @@ process.on('SIGTERM', () => {
     process.exit(0);
 });
 
+// --- DIRETÓRIO BASE ---
 const authBaseFolder = './auth';
 if (!fs.existsSync(authBaseFolder)) {
     fs.mkdirSync(authBaseFolder, { recursive: true });
 }
 
+// --- SERVIDOR EXPRESS ---
 const app = express();
 const PORT = process.env.PORT || 8080;
 
@@ -42,6 +45,7 @@ app.get('/', (req, res) => {
     res.status(200).send("ARGO'S MULTI-DEVICE SYSTEM ONLINE!");
 });
 
+// --- PROMPT DA IA ---
 const PROMPT_ARGOS = `Você é o ARGO'S, o assistente virtual inteligente oficial.
 Unidade: Angra dos Reis.
 Site de Gestão: gestaopro-five.vercel.app
@@ -56,6 +60,7 @@ Diretrizes de Resposta:
 
 const botInstances = {};
 
+// --- PROCESSADOR DE FILA ---
 async function processQueue(botNumber) {
     const instance = botInstances[botNumber];
     if (!instance || instance.isDeleted) return;
@@ -80,12 +85,9 @@ async function processQueue(botNumber) {
                 const [waStatus] = await instance.sock.onWhatsApp(jid);
                 if (waStatus && waStatus.exists) {
                     targetJid = waStatus.jid; 
-                } else {
-                    console.log(`[AVISO] O número ${jid} não possui conta ativa no WhatsApp. Disparo ignorado.`);
-                    continue; 
                 }
             } catch (errCheck) {
-                console.log(`[AVISO] Falha ao verificar número ${jid} na Meta. Tentando entrega direta...`);
+                console.log(`[AVISO] Falha ao verificar número na Meta. Tentando entrega direta...`);
             }
 
             await instance.sock.sendMessage(targetJid, { text });
@@ -103,14 +105,13 @@ async function processQueue(botNumber) {
     }
 }
 
+// --- INICIALIZADOR DO BOT ---
 async function startBot(botNumber) {
     if (botInstances[botNumber] && (botInstances[botNumber].status === 'initializing' || botInstances[botNumber].status === 'pairing')) {
-        console.log(`[SISTEMA] O bot ${botNumber} já se encontra em processo de inicialização.`);
         return;
     }
 
     if (botInstances[botNumber] && botInstances[botNumber].sock && botInstances[botNumber].status === 'online') {
-        console.log(`[SISTEMA] O bot ${botNumber} já se encontra online.`);
         return;
     }
 
@@ -154,15 +155,12 @@ async function startBot(botNumber) {
             markOnlineOnConnect: false 
         });
 
-        if (botInstances[botNumber]) {
-            botInstances[botNumber].sock = sock;
-        }
+        if (botInstances[botNumber]) botInstances[botNumber].sock = sock;
 
         sock.ev.on('creds.update', saveCreds);
 
         if (!state.creds.registered) {
             if (botInstances[botNumber]) botInstances[botNumber].status = 'pairing';
-            console.log(`\n[SISTEMA] A preparar autenticação para: ${botNumber}...`);
             
             setTimeout(async () => {
                 if (!botInstances[botNumber] || botInstances[botNumber].isDeleted) return;
@@ -171,25 +169,17 @@ async function startBot(botNumber) {
                     const code = await sock.requestPairingCode(botNumber);
                     if (botInstances[botNumber] && !botInstances[botNumber].isDeleted) {
                         botInstances[botNumber].pairingCode = code;
-                        console.log(`\n======================================================`);
-                        console.log(`🔐 CÓDIGO DE LIGAÇÃO PARA ${botNumber}: ${code}`);
-                        console.log(`⚠️ ATENÇÃO: Se o WhatsApp avisar sobre "Login Suspeito",`);
-                        console.log(`   clique em "Fui eu" antes de inserir o código!`);
-                        console.log(`======================================================\n`);
+                        console.log(`\n=== CÓDIGO PARA ${botNumber}: ${code} ===\n`);
                     }
                 } catch (error) {
                     console.error(`[ERRO] Falha ao solicitar código para ${botNumber}:`, error.message);
-                    if (botInstances[botNumber]) {
-                        botInstances[botNumber].status = 'error';
-                    }
+                    if (botInstances[botNumber]) botInstances[botNumber].status = 'error';
                 }
             }, 6000);
         }
 
         sock.ev.on('connection.update', (update) => {
-            if (!botInstances[botNumber] || botInstances[botNumber].isDeleted) {
-                return;
-            }
+            if (!botInstances[botNumber] || botInstances[botNumber].isDeleted) return;
 
             const { connection, lastDisconnect, qr } = update;
 
@@ -202,27 +192,19 @@ async function startBot(botNumber) {
                 if (botInstances[botNumber]) botInstances[botNumber].status = 'offline';
                 
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                
-                // Variável que identifica se a Meta baniu/recusou ativamente a ligação
                 const isLogout = statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403;
                 const isRestartRequired = statusCode === DisconnectReason.restartRequired || statusCode === 515;
                 
                 if (isRestartRequired) {
-                    console.log(`[LIGAÇÃO - ${botNumber}] O WhatsApp solicitou um reinício. A reconectar imediatamente...`);
                     if (botInstances[botNumber]) botInstances[botNumber].sock = null; 
                     setTimeout(() => startBot(botNumber), 2000);
                 } 
-                // ⚠️ CORREÇÃO AQUI: Se a Meta der erro 401/403, ele NÃO tenta de novo. Aborta imediatamente!
                 else if (isLogout) {
-                    console.log(`[SISTEMA - ${botNumber}] A Meta recusou a ligação (Erro ${statusCode}). Dispositivo bloqueado temporariamente ou deslogado.`);
+                    console.log(`[SISTEMA] A Meta recusou a ligação (Erro ${statusCode}). Limpando memória...`);
                     try { fs.rmSync(authFolder, { recursive: true, force: true }); } catch(e) {}
-                    
-                    if (botInstances[botNumber]) {
-                        botInstances[botNumber].isDeleted = true;
-                    }
+                    if (botInstances[botNumber]) botInstances[botNumber].isDeleted = true;
                     delete botInstances[botNumber];
                 } else {
-                    console.log(`[LIGAÇÃO - ${botNumber}] Fechada (Código: ${statusCode}). A tentar reconectar em 5s...`);
                     if (botInstances[botNumber]) botInstances[botNumber].sock = null; 
                     setTimeout(() => startBot(botNumber), 5000); 
                 }
@@ -232,7 +214,7 @@ async function startBot(botNumber) {
                     botInstances[botNumber].pairingCode = null; 
                     botInstances[botNumber].qr = null; 
                 }
-                console.log(`\n--- ARGO\'S ONLINE PARA O NÚMERO: ${botNumber} ---\n`);
+                console.log(`\n--- ARGO\'S ONLINE: ${botNumber} ---\n`);
             }
         });
 
@@ -244,9 +226,7 @@ async function startBot(botNumber) {
             const messageTimestamp = msg.messageTimestamp;
             if (messageTimestamp) {
                 const nowInSeconds = Math.floor(Date.now() / 1000);
-                if (nowInSeconds - messageTimestamp > 60) {
-                    return; 
-                }
+                if (nowInSeconds - messageTimestamp > 60) return; 
             }
 
             if (!botInstances[botNumber] || !botInstances[botNumber].isAutoReplyActive || botInstances[botNumber].isDeleted) return;
@@ -259,10 +239,7 @@ async function startBot(botNumber) {
         });
 
     } catch (error) {
-        console.error(`[ERRO CRÍTICO] Falha ao iniciar o bot ${botNumber}:`, error.message);
-        
         if (!botInstances[botNumber] || botInstances[botNumber].isDeleted) return;
-
         if (botInstances[botNumber]) {
             botInstances[botNumber].status = 'error';
             botInstances[botNumber].sock = null; 
@@ -271,29 +248,23 @@ async function startBot(botNumber) {
     }
 }
 
+// --- INTEGRAÇÃO IA GROQ ---
 async function handleAIProcess(botNumber, jid, text) {
     const instance = botInstances[botNumber];
     if (!instance || instance.isDeleted) return; 
 
-    if (!instance.sessions[jid]) {
-        instance.sessions[jid] = { chat: [], lastActive: Date.now() };
-    }
+    if (!instance.sessions[jid]) instance.sessions[jid] = { chat: [], lastActive: Date.now() };
+    
     const session = instance.sessions[jid];
     session.lastActive = Date.now(); 
-
     session.chat.push({ role: "user", content: text });
     if (session.chat.length > 10) session.chat.shift();
 
     const apiKey = process.env.GROQ_API_KEY || "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";
-
-    if (!apiKey || apiKey.trim() === "") {
-        console.error(`[AVISO AI - ${botNumber}]: IA não respondeu. Nenhuma variável 'GROQ_API_KEY' foi encontrada.`);
-        return;
-    }
+    if (!apiKey || apiKey.trim() === "") return;
 
     try {
         const groq = new Groq({ apiKey: apiKey });
-        
         await instance.sock.sendPresenceUpdate("composing", jid);
         const response = await groq.chat.completions.create({
             messages: [{ role: "system", content: PROMPT_ARGOS }, ...session.chat],
@@ -308,67 +279,53 @@ async function handleAIProcess(botNumber, jid, text) {
             await instance.sock.sendMessage(jid, { text: reply });
         }
     } catch (err) {
-        console.error(`[ERRO AI - ${botNumber}]:`, err.message || err);
+        console.error(`[ERRO AI]:`, err.message || err);
     }
 }
 
+// --- LIMPEZA DE MEMÓRIA (GARBAGE COLLECTOR) ---
 setInterval(() => {
     const now = Date.now();
     for (const botNumber of Object.keys(botInstances)) {
         const instance = botInstances[botNumber];
         if (instance && instance.sessions && !instance.isDeleted) {
             for (const [jid, session] of Object.entries(instance.sessions)) {
-                if (now - session.lastActive > 1800000) {
-                    delete instance.sessions[jid];
-                }
+                if (now - session.lastActive > 1800000) delete instance.sessions[jid];
             }
         }
     }
 }, 600000);
 
+// --- ROTAS DA API ---
 function formatNumberBR(number) {
     let clean = number.toString().replace(/\D/g, '');
-    if (clean.length === 13 && clean.substring(0, 2) === clean.substring(2, 4)) {
-        clean = clean.substring(2);
-    }
-    if ((clean.length === 10 || clean.length === 11) && !clean.startsWith('55')) {
-        clean = '55' + clean;
-    }
+    if (clean.length === 13 && clean.substring(0, 2) === clean.substring(2, 4)) clean = clean.substring(2);
+    if ((clean.length === 10 || clean.length === 11) && !clean.startsWith('55')) clean = '55' + clean;
     return clean;
 }
 
 app.post('/api/connect', async (req, res) => {
     const { botNumber } = req.body;
     if (!botNumber) return res.status(400).json({ error: "O campo 'botNumber' é obrigatório." });
-
     const cleanNumber = formatNumberBR(botNumber);
     await startBot(cleanNumber);
-    
-    res.json({ success: true, message: `Processo de ligação iniciado para ${cleanNumber}.` });
+    res.json({ success: true, message: `Processo iniciado para ${cleanNumber}.` });
 });
 
 app.post('/api/send', (req, res) => {
     const { botNumber, number, message } = req.body;
-    
-    if (!botNumber || !number || !message) {
-        return res.status(400).json({ error: "Os campos 'botNumber', 'number' e 'message' não podem estar vazios." });
-    }
+    if (!botNumber || !number || !message) return res.status(400).json({ error: "Campos obrigatórios em falta." });
 
     const cleanBotNumber = formatNumberBR(botNumber);
     const instance = botInstances[cleanBotNumber];
     
     if (!instance || !instance.sock || instance.status !== 'online' || instance.isDeleted) {
-        return res.status(503).json({ error: `O bot ${cleanBotNumber} não está ligado.` });
+        return res.status(503).json({ error: `O bot não está ligado.` });
     }
 
-    const cleanRecipient = formatNumberBR(number);
-    const jid = `${cleanRecipient}@s.whatsapp.net`;
-
+    const jid = `${formatNumberBR(number)}@s.whatsapp.net`;
     if (!instance.sendQueue) instance.sendQueue = [];
-    
-    if (instance.sendQueue.length > 5000) {
-        return res.status(429).json({ error: "A fila deste bot atingiu o limite." });
-    }
+    if (instance.sendQueue.length > 5000) return res.status(429).json({ error: "Fila cheia." });
 
     instance.sendQueue.push({ jid, text: message });
 
@@ -376,54 +333,44 @@ app.post('/api/send', (req, res) => {
         instance.isProcessingQueue = true;
         processQueue(cleanBotNumber);
     }
-
-    res.json({ success: true, message: `Adicionado à fila. Faltam processar: ${instance.sendQueue.length}` });
+    res.json({ success: true, message: `Adicionado à fila.` });
 });
 
 app.post('/api/toggle', (req, res) => {
     const { botNumber, active } = req.body;
-    if (!botNumber) return res.status(400).json({ error: "O campo 'botNumber' é obrigatório." });
+    if (!botNumber) return res.status(400).json({ error: "Falta botNumber." });
     
     const cleanBotNumber = formatNumberBR(botNumber);
-
     if (botInstances[cleanBotNumber] && !botInstances[cleanBotNumber].isDeleted) {
         botInstances[cleanBotNumber].isAutoReplyActive = active === true;
-        res.json({ success: true, botNumber: cleanBotNumber, active: botInstances[cleanBotNumber].isAutoReplyActive });
+        res.json({ success: true, active: botInstances[cleanBotNumber].isAutoReplyActive });
     } else {
-        res.status(404).json({ error: `Bot ${cleanBotNumber} não encontrado.` });
+        res.status(404).json({ error: `Bot não encontrado.` });
     }
 });
 
 app.post('/api/reset', (req, res) => {
     const { botNumber } = req.body;
-    if (!botNumber) return res.status(400).json({ error: "O campo 'botNumber' é obrigatório." });
+    if (!botNumber) return res.status(400).json({ error: "Falta botNumber." });
 
     const cleanNumber = formatNumberBR(botNumber);
     const authFolder = `${authBaseFolder}/${cleanNumber}`;
     
     try {
         const instance = botInstances[cleanNumber];
-        
         if (instance) {
             instance.isDeleted = true;
-            
             if (instance.sock) {
                 instance.sock.logout().catch(() => {});
                 instance.sock.end(undefined);
                 if (instance.sock.ws) instance.sock.ws.close();
             }
         }
-        
-        if (fs.existsSync(authFolder)) {
-            fs.rmSync(authFolder, { recursive: true, force: true });
-        }
-        
+        if (fs.existsSync(authFolder)) fs.rmSync(authFolder, { recursive: true, force: true });
         delete botInstances[cleanNumber];
-        
-        console.log(`[SISTEMA] Instância ${cleanNumber} completamente eliminada da memória.`);
-        res.json({ success: true, message: `A sessão do bot ${cleanNumber} foi encerrada e apagada com sucesso.` });
+        res.json({ success: true, message: `Sessão apagada.` });
     } catch (error) {
-        res.status(500).json({ error: "Erro ao tentar limpar a sessão: " + error.message });
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -436,33 +383,21 @@ app.get('/api/status', (req, res) => {
                 autoReply: instance.isAutoReplyActive,
                 pairingCode: instance.pairingCode,
                 qrCode: instance.qr, 
-                qrUrl: instance.qr ? `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(instance.qr)}` : null,
                 queueLength: instance.sendQueue ? instance.sendQueue.length : 0
             };
         }
     }
-
-    res.json({ 
-        system: "ARGO'S MULTI-DEVICE", 
-        uptime: process.uptime(),
-        bots: statusData
-    });
+    res.json({ system: "ARGO'S MULTI-DEVICE", uptime: process.uptime(), bots: statusData });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[SERVER] API Multi-Device a correr em 0.0.0.0:${PORT}`);
-    
+    console.log(`[SERVER] API a correr em 0.0.0.0:${PORT}`);
     setTimeout(() => {
         try {
             const folders = fs.readdirSync(authBaseFolder);
             folders.forEach(folder => {
-                if (/^\d+$/.test(folder)) {
-                    console.log(`[AUTO-LOADER] A inicializar sessão guardada para: ${folder}`);
-                    startBot(folder);
-                }
+                if (/^\d+$/.test(folder)) startBot(folder);
             });
-        } catch (e) {
-            console.log("[AUTO-LOADER] Nenhuma sessão anterior encontrada.");
-        }
+        } catch (e) {}
     }, 5000);
 });
