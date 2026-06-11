@@ -1,26 +1,20 @@
 {
-"name": "bot-estacio-simulador",
-"version": "1.0.0",
-"description": "Bot WhatsApp para simulação de preços Estácio com Llama 3 via Groq",
-"main": "index.js",
-"scripts": {
-"start": "node index.js"
-},
-"keywords": [
-"whatsapp",
-"bot",
-"baileys",
-"estacio",
-"groq",
-"ai"
-],
-"author": "",
-"license": "ISC",
-"type": "commonjs",
-"dependencies": {
-"@whiskeysockets/baileys": "^7.0.0-rc.9",
-"dotenv": "^16.4.5",
-"groq-sdk": "^0.3.3",
-"qrcode-terminal": "^0.12.0"
-}
+  "name": "Ane Boot de Atendimento",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "dotenv": "^16.4.5",
+    "groq-sdk": "^0.3.3",
+    "qrcode-terminal": "^0.12.0",
+    "puppeteer": "^22.6.0"
+  }
 }
