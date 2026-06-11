@@ -1,403 +1,201 @@
-//#region ARGO'S - WhatsApp & API Bridge (Multi-Device)
-
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, delay, Browsers } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
-const { Groq } = require('groq-sdk');
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const pino = require('pino'); 
-require('dotenv').config();
+require('dotenv').config(); 
+const { Groq } = require('groq-sdk'); 
 
-// --- PROTEÇÃO GLOBAL CONTRA QUEDAS ---
-process.on('uncaughtException', (err) => {
-    console.error('[ERRO CRÍTICO NÃO TRATADO]:', err?.message || err);
-});
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('[PROMISE REJEITADA NÃO TRATADA]:', reason?.message || reason);
+// Inicializa a conexão com o Groq (Llama 3)
+const groq = new Groq({
+    apiKey: process.env.GROQ_API_KEY || "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"
 });
 
-process.on('SIGTERM', () => {
-    console.log('\n[SISTEMA] Sinal SIGTERM recebido do Railway. Salvando estado e encerrando com segurança...');
-    process.exit(0);
-});
+async function Bot() {
 
-// --- DIRETÓRIO BASE ---
-const authBaseFolder = './auth';
-if (!fs.existsSync(authBaseFolder)) {
-    fs.mkdirSync(authBaseFolder, { recursive: true });
-}
+    // 1. BUSCAR A VERSÃO ATUALIZADA (EVITA O ERRO 405)
+    const { version } = await fetchLatestBaileysVersion();
+    const { state, saveCreds } = await useMultiFileAuthState('auth/bot');
 
-// --- SERVIDOR EXPRESS ---
-const app = express();
-const PORT = process.env.PORT || 8080;
+    // Criando socket do WhatsApp
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: false,
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+    });
 
-app.use(cors({
-    origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization']
-}));
-
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-app.get('/', (req, res) => {
-    res.status(200).send("ARGO'S MULTI-DEVICE SYSTEM ONLINE!");
-});
-
-// --- PROMPT DA IA ---
-const PROMPT_ARGOS = `Você é o ARGO'S, o assistente virtual inteligente oficial.
-Unidade: Angra dos Reis.
-Site de Gestão: gestaopro-five.vercel.app
-
-Diretrizes de Resposta:
-1. Sempre se apresente como ARGO'S da unidade Angra dos Reis.
-2. Use as informações do site gestaopro-five.vercel.app para ajudar os clientes.
-3. Mantenha um tom profissional, tecnológico e ágil.
-4. Respostas curtas e objetivas (estilo WhatsApp).
-5. Se o atendimento automático estiver desativado no sistema, você não deve responder.
-6. Nunca invente dados de pedidos. Direcione o cliente para o painel do site se necessário.`;
-
-const botInstances = {};
-
-// --- PROCESSADOR DE FILA ---
-async function processQueue(botNumber) {
-    const instance = botInstances[botNumber];
-    if (!instance || instance.isDeleted) return;
-
-    while (instance.sendQueue && instance.sendQueue.length > 0) {
-        if (!botInstances[botNumber] || botInstances[botNumber].isDeleted) return;
-
-        if (instance.status !== 'online' || !instance.sock) {
-            console.log(`[FILA] Bot ${botNumber} está offline. Fila em pausa. A aguardar...`);
-            await delay(5000);
-            continue; 
-        }
-
-        const { jid, text } = instance.sendQueue.shift();
-        
-        try {
-            const waitTime = 2000 + Math.floor(Math.random() * 2000);
-            await delay(waitTime);
-
-            let targetJid = jid;
-            try {
-                const [waStatus] = await instance.sock.onWhatsApp(jid);
-                if (waStatus && waStatus.exists) {
-                    targetJid = waStatus.jid; 
-                }
-            } catch (errCheck) {
-                console.log(`[AVISO] Falha ao verificar número na Meta. Tentando entrega direta...`);
-            }
-
-            await instance.sock.sendMessage(targetJid, { text });
-            console.log(`[DISPARO] Mensagem entregue a ${targetJid} via bot ${botNumber} | Restam: ${instance.sendQueue.length}`);
-        } catch (e) {
-            console.error(`[ERRO DISPARO] Falha ao enviar para ${jid}:`, e.message || e);
-            if (e.message && e.message.toLowerCase().includes('closed') && botInstances[botNumber] && !botInstances[botNumber].isDeleted) {
-                botInstances[botNumber].sendQueue.unshift({ jid, text });
-            }
-        }
-    }
+    sock.ev.on('creds.update', saveCreds);
     
-    if (botInstances[botNumber]) {
-        botInstances[botNumber].isProcessingQueue = false;
-    }
-}
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
 
-// --- INICIALIZADOR DO BOT ---
-async function startBot(botNumber) {
-    if (botInstances[botNumber] && (botInstances[botNumber].status === 'initializing' || botInstances[botNumber].status === 'pairing')) {
-        return;
-    }
-
-    if (botInstances[botNumber] && botInstances[botNumber].sock && botInstances[botNumber].status === 'online') {
-        return;
-    }
-
-    console.log(`[BOT] Iniciando ligação para o número: ${botNumber}...`);
-    
-    const authFolder = `${authBaseFolder}/${botNumber}`;
-    if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
-
-    if (!botInstances[botNumber]) {
-        botInstances[botNumber] = {
-            sock: null,
-            isAutoReplyActive: false, 
-            sessions: {},
-            status: 'initializing',
-            pairingCode: null,
-            qr: null,
-            sendQueue: [], 
-            isProcessingQueue: false,
-            isDeleted: false 
-        };
-    } else {
-        botInstances[botNumber].status = 'initializing';
-        botInstances[botNumber].isDeleted = false;
-    }
-
-    try {
-        const { version } = await fetchLatestBaileysVersion();
-        const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-
-        const sock = makeWASocket({
-            version,
-            auth: state,
-            logger: pino({ level: 'silent' }), 
-            printQRInTerminal: false,
-            browser: Browsers.macOS('Desktop'), 
-            connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 0,
-            keepAliveIntervalMs: 30000, 
-            syncFullHistory: false, 
-            generateHighQualityLinkPreview: false, 
-            markOnlineOnConnect: false 
-        });
-
-        if (botInstances[botNumber]) botInstances[botNumber].sock = sock;
-
-        sock.ev.on('creds.update', saveCreds);
-
-        if (!state.creds.registered) {
-            if (botInstances[botNumber]) botInstances[botNumber].status = 'pairing';
+        // Gerando Qrcode
+        if (qr) {
+            console.clear(); 
+            console.log(`==========================================\nAPONTE O WHATSAPP PARA O QR CODE\n==========================================`);
+            qrcode.generate(qr, { small: true });
             
-            setTimeout(async () => {
-                if (!botInstances[botNumber] || botInstances[botNumber].isDeleted) return;
+            const linkQrCode = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
+            console.log(`\n⚠️ SE O QR CODE ACIMA ESTIVER DISTORCIDO, ABRA O LINK ABAIXO NO SEU NAVEGADOR:`);
+            console.log(linkQrCode);
+            console.log(`==========================================`);
+        }
+
+        // Não houve conexão (caiu ou reiniciou)
+        if (connection === 'close') {
+            const erroCode = lastDisconnect?.error?.output?.statusCode;
+            if (erroCode === 405) console.log("Erro 405 persistente. Tentando forçar nova versão...");
+        
+            const deveReconectar = erroCode !== DisconnectReason.loggedOut;
+            if (deveReconectar) setTimeout(() => Bot(), 5000); 
+        
+        // Conectado com sucesso
+        } else if (connection === 'open') console.log('--- CONEXÃO ESTABELECIDA COM SUCESSO ---');
+    });
+    
+    flow.sock = sock;
+    
+    sock.ev.on("messages.upsert", async m => {
+
+        if(m.type !== "notify") return;
+
+        let _new = m.messages[0];
+        if(!_new.message || _new.key.fromMe || _new.key.remoteJid?.endsWith("@g.us")) return;
+
+        // Extrai o texto da mensagem do usuário
+        await flow.core({
+            Jid: _new.key.remoteJid,
+            msg: _new.message?.conversation ||
+                 _new.message?.extendedTextMessage?.text ||
+                 _new.message?.imageMessage?.caption ||
+                 _new.message?.videoMessage?.caption ||
+                 _new.message?.documentMessage?.caption ||
+                 _new.message?.buttonsResponseMessage?.selectedButtonId ||
+                 _new.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+                 _new.message?.templateButtonReplyMessage?.selectedId ||
+                "",
+        });
+    });
+}; 
+
+const flow = {
+
+    sock: null,
+    sess: {},
+
+    async core(_user) {
+
+        if (!_user.msg) return; // Ignora mensagens vazias/áudios/figurinhas
+
+        // Inicializa a sessão do usuário caso não exista
+        if(!this.sess[_user.Jid]) {
+            this.sess[_user.Jid] = { 
+                coleta_preco: false,
+                etapa_preco: 0,
+                dados_preco: {}
+            }; 
+        };
+
+        const sessao = this.sess[_user.Jid];
+        const msgText = _user.msg.trim().toLowerCase();
+
+        // Se a pessoa digitar o comando de gatilho
+        if (msgText === "#preço" || msgText === "#preco") {
+            sessao.coleta_preco = true;
+            sessao.etapa_preco = 1;
+            sessao.dados_preco = {}; // Limpa pesquisas antigas
+            
+            await this.send(_user.Jid, { text: "Qual formação busca?\n(Graduação - Pós-graduação - Curso Técnico)" });
+            return; 
+        }
+
+        // REGRA DE OURO: SE O USUÁRIO NÃO ESTIVER NO MEIO DA PESQUISA, O BOT IGNORA A MENSAGEM COMPLETAMENTE
+        if (!sessao.coleta_preco) {
+            return; 
+        }
+
+        // Se estiver no funil de pesquisa, segue a ordem de perguntas
+        switch (sessao.etapa_preco) {
+            case 1:
+                sessao.dados_preco.formacao = _user.msg;
+                sessao.etapa_preco = 2;
+                await this.send(_user.Jid, { text: "Qual curso você quer fazer?" });
+                return;
+            case 2:
+                sessao.dados_preco.curso = _user.msg;
+                sessao.etapa_preco = 3;
+                await this.send(_user.Jid, { text: "Qual o seu Estado?" });
+                return;
+            case 3:
+                sessao.dados_preco.estado = _user.msg;
+                sessao.etapa_preco = 4;
+                await this.send(_user.Jid, { text: "Qual a sua Cidade?" });
+                return;
+            case 4:
+                sessao.dados_preco.cidade = _user.msg;
+                sessao.etapa_preco = 5;
+                await this.send(_user.Jid, { text: "Qual o seu Bairro?" });
+                return;
+            case 5:
+                sessao.dados_preco.bairro = _user.msg;
+                sessao.etapa_preco = 6;
+                await this.send(_user.Jid, { text: "Como você prefere estudar?\n(Presencial - Semipresencial - EAD)" });
+                return;
+            
+            case 6:
+                sessao.dados_preco.modalidade = _user.msg;
+                sessao.dados_preco.ingresso = "simplificado"; // Preenchido automático para a IA
+                
+                // Encerra o fluxo de coleta para este cliente
+                sessao.coleta_preco = false;
+                sessao.etapa_preco = 0;
+                
+                await this.send(_user.Jid, { text: "⏳ *Aguarde um momento...*\nEstou simulando a pesquisa de valores no sistema com seus dados..." });
+                
+                // Prompt isolado exclusivo para a simulação com a IA baseada na Estácio
+                const promptSimulacao = `Você é um robô de simulação. O usuário informou os seguintes dados para pesquisar um curso:
+                - Formação: ${sessao.dados_preco.formacao}
+                - Curso: ${sessao.dados_preco.curso}
+                - Estado: ${sessao.dados_preco.estado}
+                - Cidade: ${sessao.dados_preco.cidade}
+                - Bairro: ${sessao.dados_preco.bairro}
+                - Modalidade: ${sessao.dados_preco.modalidade}
+                - Forma de Ingresso: Simplificado
+                
+                SIMULE uma resposta informando que a pesquisa no site foi feita. 
+                Invente um valor realista para a mensalidade deste curso (entre R$ 130,00 e R$ 600,00 dependendo da formação e modalidade).
+                Ao final, informe OBRIGATORIAMENTE que para garantir esse valor simulado, a pessoa deve acessar o site oficial: estacio.br/selecao?cod_agente=347090.
+                Seja direto, profissional e focado nas informações coletadas. Não faça novas perguntas.`;
 
                 try {
-                    const code = await sock.requestPairingCode(botNumber);
-                    if (botInstances[botNumber] && !botInstances[botNumber].isDeleted) {
-                        botInstances[botNumber].pairingCode = code;
-                        console.log(`\n=== CÓDIGO PARA ${botNumber}: ${code} ===\n`);
-                    }
-                } catch (error) {
-                    console.error(`[ERRO] Falha ao solicitar código para ${botNumber}:`, error.message);
-                    if (botInstances[botNumber]) botInstances[botNumber].status = 'error';
+                    await this.sock.sendPresenceUpdate("composing", _user.Jid);
+                    const chatCompletion = await groq.chat.completions.create({
+                        messages: [{ role: "system", content: promptSimulacao }],
+                        model: "llama-3.1-8b-instant",
+                        temperature: 0.7,
+                        max_tokens: 350,
+                    });
+                    
+                    const respostaFinal = chatCompletion.choices[0]?.message?.content || "Houve um erro na geração da IA, mas acesse o site para conferir o valor real: estacio.br/selecao?cod_agente=347090";
+                    await this.send(_user.Jid, { text: respostaFinal });
+                    
+                } catch (e) {
+                    console.log("Erro na IA:", e);
+                    // Resposta de segurança caso a IA (Groq) fique fora do ar
+                    await this.send(_user.Jid, { text: `✅ *Pesquisa Simulada Concluída!*\n\nValor estimado da mensalidade para *${sessao.dados_preco.curso}* (${sessao.dados_preco.modalidade}): R$ 199,00 (Ingresso Simplificado).\n\nAcesse o link oficial para garantir esse desconto: estacio.br/selecao?cod_agente=347090` });
                 }
-            }, 6000);
+                return; 
         }
+    },
 
-        sock.ev.on('connection.update', (update) => {
-            if (!botInstances[botNumber] || botInstances[botNumber].isDeleted) return;
-
-            const { connection, lastDisconnect, qr } = update;
-
-            if (qr && botInstances[botNumber]) {
-                botInstances[botNumber].qr = qr; 
-                qrcode.generate(qr, { small: true });
-            }
-
-            if (connection === 'close') {
-                if (botInstances[botNumber]) botInstances[botNumber].status = 'offline';
-                
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const isLogout = statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403;
-                const isRestartRequired = statusCode === DisconnectReason.restartRequired || statusCode === 515;
-                
-                if (isRestartRequired) {
-                    if (botInstances[botNumber]) botInstances[botNumber].sock = null; 
-                    setTimeout(() => startBot(botNumber), 2000);
-                } 
-                else if (isLogout) {
-                    console.log(`[SISTEMA] A Meta recusou a ligação (Erro ${statusCode}). Limpando memória...`);
-                    try { fs.rmSync(authFolder, { recursive: true, force: true }); } catch(e) {}
-                    if (botInstances[botNumber]) botInstances[botNumber].isDeleted = true;
-                    delete botInstances[botNumber];
-                } else {
-                    if (botInstances[botNumber]) botInstances[botNumber].sock = null; 
-                    setTimeout(() => startBot(botNumber), 5000); 
-                }
-            } else if (connection === 'open') {
-                if (botInstances[botNumber]) {
-                    botInstances[botNumber].status = 'online';
-                    botInstances[botNumber].pairingCode = null; 
-                    botInstances[botNumber].qr = null; 
-                }
-                console.log(`\n--- ARGO\'S ONLINE: ${botNumber} ---\n`);
-            }
-        });
-
-        sock.ev.on("messages.upsert", async m => {
-            if (m.type !== "notify") return;
-            let msg = m.messages[0];
-            if (!msg.message || msg.key.fromMe || msg.key.remoteJid?.endsWith("@g.us")) return;
-            
-            const messageTimestamp = msg.messageTimestamp;
-            if (messageTimestamp) {
-                const nowInSeconds = Math.floor(Date.now() / 1000);
-                if (nowInSeconds - messageTimestamp > 60) return; 
-            }
-
-            if (!botInstances[botNumber] || !botInstances[botNumber].isAutoReplyActive || botInstances[botNumber].isDeleted) return;
-
-            const jid = msg.key.remoteJid;
-            const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
-            if (!text) return;
-
-            await handleAIProcess(botNumber, jid, text);
-        });
-
-    } catch (error) {
-        if (!botInstances[botNumber] || botInstances[botNumber].isDeleted) return;
-        if (botInstances[botNumber]) {
-            botInstances[botNumber].status = 'error';
-            botInstances[botNumber].sock = null; 
-        }
-        setTimeout(() => startBot(botNumber), 10000);
-    }
-}
-
-// --- INTEGRAÇÃO IA GROQ ---
-async function handleAIProcess(botNumber, jid, text) {
-    const instance = botInstances[botNumber];
-    if (!instance || instance.isDeleted) return; 
-
-    if (!instance.sessions[jid]) instance.sessions[jid] = { chat: [], lastActive: Date.now() };
-    
-    const session = instance.sessions[jid];
-    session.lastActive = Date.now(); 
-    session.chat.push({ role: "user", content: text });
-    if (session.chat.length > 10) session.chat.shift();
-
-    const apiKey = process.env.GROQ_API_KEY || "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";
-    if (!apiKey || apiKey.trim() === "") return;
-
-    try {
-        const groq = new Groq({ apiKey: apiKey });
-        await instance.sock.sendPresenceUpdate("composing", jid);
-        const response = await groq.chat.completions.create({
-            messages: [{ role: "system", content: PROMPT_ARGOS }, ...session.chat],
-            model: "llama-3.1-8b-instant",
-            temperature: 0.6
-        });
-        const reply = response.choices[0]?.message?.content || "Estou a processar a sua dúvida.";
-        session.chat.push({ role: "assistant", content: reply });
-        await delay(Math.min(reply.length * 15, 3000));
+    async send(_jid, _msg = {}) {
+        await this.sock.sendPresenceUpdate("composing", _jid);
         
-        if (botInstances[botNumber] && !botInstances[botNumber].isDeleted) {
-            await instance.sock.sendMessage(jid, { text: reply });
-        }
-    } catch (err) {
-        console.error(`[ERRO AI]:`, err.message || err);
-    }
+        // Simula tempo de digitação levemente proporcional ao tamanho do texto
+        const textLength = _msg?.text?.length || 50; 
+        await new Promise(resolve => setTimeout(resolve, Math.min(6000, textLength * 15)));
+
+        await this.sock.sendMessage(_jid, _msg);
+        await this.sock.sendPresenceUpdate('paused', _jid);
+    },
 }
 
-// --- LIMPEZA DE MEMÓRIA (GARBAGE COLLECTOR) ---
-setInterval(() => {
-    const now = Date.now();
-    for (const botNumber of Object.keys(botInstances)) {
-        const instance = botInstances[botNumber];
-        if (instance && instance.sessions && !instance.isDeleted) {
-            for (const [jid, session] of Object.entries(instance.sessions)) {
-                if (now - session.lastActive > 1800000) delete instance.sessions[jid];
-            }
-        }
-    }
-}, 600000);
-
-// --- ROTAS DA API ---
-function formatNumberBR(number) {
-    let clean = number.toString().replace(/\D/g, '');
-    if (clean.length === 13 && clean.substring(0, 2) === clean.substring(2, 4)) clean = clean.substring(2);
-    if ((clean.length === 10 || clean.length === 11) && !clean.startsWith('55')) clean = '55' + clean;
-    return clean;
-}
-
-app.post('/api/connect', async (req, res) => {
-    const { botNumber } = req.body;
-    if (!botNumber) return res.status(400).json({ error: "O campo 'botNumber' é obrigatório." });
-    const cleanNumber = formatNumberBR(botNumber);
-    await startBot(cleanNumber);
-    res.json({ success: true, message: `Processo iniciado para ${cleanNumber}.` });
-});
-
-app.post('/api/send', (req, res) => {
-    const { botNumber, number, message } = req.body;
-    if (!botNumber || !number || !message) return res.status(400).json({ error: "Campos obrigatórios em falta." });
-
-    const cleanBotNumber = formatNumberBR(botNumber);
-    const instance = botInstances[cleanBotNumber];
-    
-    if (!instance || !instance.sock || instance.status !== 'online' || instance.isDeleted) {
-        return res.status(503).json({ error: `O bot não está ligado.` });
-    }
-
-    const jid = `${formatNumberBR(number)}@s.whatsapp.net`;
-    if (!instance.sendQueue) instance.sendQueue = [];
-    if (instance.sendQueue.length > 5000) return res.status(429).json({ error: "Fila cheia." });
-
-    instance.sendQueue.push({ jid, text: message });
-
-    if (!instance.isProcessingQueue) {
-        instance.isProcessingQueue = true;
-        processQueue(cleanBotNumber);
-    }
-    res.json({ success: true, message: `Adicionado à fila.` });
-});
-
-app.post('/api/toggle', (req, res) => {
-    const { botNumber, active } = req.body;
-    if (!botNumber) return res.status(400).json({ error: "Falta botNumber." });
-    
-    const cleanBotNumber = formatNumberBR(botNumber);
-    if (botInstances[cleanBotNumber] && !botInstances[cleanBotNumber].isDeleted) {
-        botInstances[cleanBotNumber].isAutoReplyActive = active === true;
-        res.json({ success: true, active: botInstances[cleanBotNumber].isAutoReplyActive });
-    } else {
-        res.status(404).json({ error: `Bot não encontrado.` });
-    }
-});
-
-app.post('/api/reset', (req, res) => {
-    const { botNumber } = req.body;
-    if (!botNumber) return res.status(400).json({ error: "Falta botNumber." });
-
-    const cleanNumber = formatNumberBR(botNumber);
-    const authFolder = `${authBaseFolder}/${cleanNumber}`;
-    
-    try {
-        const instance = botInstances[cleanNumber];
-        if (instance) {
-            instance.isDeleted = true;
-            if (instance.sock) {
-                instance.sock.logout().catch(() => {});
-                instance.sock.end(undefined);
-                if (instance.sock.ws) instance.sock.ws.close();
-            }
-        }
-        if (fs.existsSync(authFolder)) fs.rmSync(authFolder, { recursive: true, force: true });
-        delete botInstances[cleanNumber];
-        res.json({ success: true, message: `Sessão apagada.` });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.get('/api/status', (req, res) => {
-    const statusData = {};
-    for (const [number, instance] of Object.entries(botInstances)) {
-        if (!instance.isDeleted) {
-            statusData[number] = {
-                status: instance.status,
-                autoReply: instance.isAutoReplyActive,
-                pairingCode: instance.pairingCode,
-                qrCode: instance.qr, 
-                queueLength: instance.sendQueue ? instance.sendQueue.length : 0
-            };
-        }
-    }
-    res.json({ system: "ARGO'S MULTI-DEVICE", uptime: process.uptime(), bots: statusData });
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[SERVER] API a correr em 0.0.0.0:${PORT}`);
-    setTimeout(() => {
-        try {
-            const folders = fs.readdirSync(authBaseFolder);
-            folders.forEach(folder => {
-                if (/^\d+$/.test(folder)) startBot(folder);
-            });
-        } catch (e) {}
-    }, 5000);
-});
+Bot();
