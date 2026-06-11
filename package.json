@@ -1,31 +1,26 @@
 {
-  "name": "argos-atendimento-ai",
-  "version": "1.2.0",
-  "description": "Bot WhatsApp ARGO'S com integração API e proteção contra crash",
-  "main": "index.js",
-  "engines": {
-    "node": ">=20.0.0"
-  },
-  "scripts": {
-    "start": "node index.js"
-  },
-  "keywords": [
-    "whatsapp",
-    "bot",
-    "ai",
-    "llama3",
-    "groq",
-    "api"
-  ],
-  "author": "ARGO'S System",
-  "license": "ISC",
-  "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "groq-sdk": "^0.3.3",
-    "pino": "^8.20.0",
-    "qrcode-terminal": "^0.12.0"
-  }
+"name": "bot-estacio-simulador",
+"version": "1.0.0",
+"description": "Bot WhatsApp para simulação de preços Estácio com Llama 3 via Groq",
+"main": "index.js",
+"scripts": {
+"start": "node index.js"
+},
+"keywords": [
+"whatsapp",
+"bot",
+"baileys",
+"estacio",
+"groq",
+"ai"
+],
+"author": "",
+"license": "ISC",
+"type": "commonjs",
+"dependencies": {
+"@whiskeysockets/baileys": "^7.0.0-rc.9",
+"dotenv": "^16.4.5",
+"groq-sdk": "^0.3.3",
+"qrcode-terminal": "^0.12.0"
+}
 }
